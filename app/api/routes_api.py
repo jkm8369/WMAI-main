@@ -715,3 +715,286 @@ async def delete_old_ethics_logs(days: int = Query(90, description="보관 기�
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"로그 삭제 중 오류: {str(e)}")
 
+# ============================================
+# 🚨 이탈 징후 관리자 대시보드 API
+# 이 API는 관리자 대시보드용 RAG 기반 이탈 징후 경보
+# ============================================
+
+class RiskFeedbackRequest(BaseModel):
+    """위험 피드백 요청 모델"""
+    chunk_id: str = Field(..., description="위험 문장 청크 ID")
+    confirmed: bool = Field(..., description="관리자 확인 여부 (true: 맞다, false: 아니다)")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "chunk_id": "user123_post456_0",
+                "confirmed": True
+            }
+        }
+
+class RiskReportRequest(BaseModel):
+    """위험 보고서 생성 요청 모델"""
+    text: str = Field(..., description="분석할 게시글/댓글 텍스트")
+    user_id: str = Field(..., description="작성자 사용자 ID")
+    post_id: str = Field(..., description="게시글 ID")
+    created_at: Optional[str] = Field(None, description="작성 시간 (ISO 형식, 선택사항)")
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "text": "이 서비스 정말 싫어요. 그만두고 싶어요. 시간낭비인 것 같아서 포기할래요.",
+                "user_id": "user_12345",
+                "post_id": "post_67890",
+                "created_at": "2025-10-31T15:30:00Z"
+            }
+        }
+
+class TopRiskUser(BaseModel):
+    """고위험 사용자 모델"""
+    user_id: str
+    username: str
+    risk_score: float
+    evidence_sentences: List[str]
+    similar_patterns_count: int
+    last_activity: str
+    priority: str
+    suggested_action: str
+    chunk_id: str
+
+# 임시 데모용 API - /risk/top GET 엔드포인트
+@router.get("/risk/top", tags=["risk-management"])
+async def get_top_risk_users(limit: int = Query(10, ge=1, le=50, description="조회할 사용자 수")):
+    """
+    임시 데모용 API: 최근 고위험으로 감지된 사용자/문장 Top N 조회
+    
+    로컬 테스트 환경에서 이탈 위험 사용자 리스트를 브라우저에서 확인할 수 있습니다.
+    
+    - **limit**: 조회할 사용자 수 (기본값: 10, 최대: 50)
+    
+    Returns:
+    - 고위험 문장 리스트 (최신순 정렬)
+    - 각 문장별 위험도, 사용자 정보, 확인 상태 포함
+    """
+    
+    try:
+        # 로컬 테스트용 SQLite에서 데이터 조회
+        from chrun_backend.rag_pipeline.high_risk_store import init_db, get_recent_high_risk
+        
+        # DB 초기화 보장 (테이블 생성 및 더미 데이터 삽입)
+        init_db()
+        
+        # 최근 고위험 문장들 조회
+        high_risk_chunks = get_recent_high_risk(limit=limit)
+        
+        # 프론트엔드가 기대하는 구조로 변환
+        users = []
+        for chunk in high_risk_chunks:
+            # 우선순위 결정
+            risk_score = chunk.get('risk_score', 0.0)
+            if risk_score >= 0.85:
+                priority = "HIGH"
+            elif risk_score >= 0.70:
+                priority = "MEDIUM"
+            else:
+                priority = "LOW"
+            
+            # 사용자명 생성
+            user_id = chunk.get('user_id', 'unknown')
+            username = f"사용자_{user_id.split('_')[-1]}" if user_id != 'unknown' else "익명"
+            
+            user_data = {
+                "user_id": user_id,
+                "username": username,
+                "risk_score": risk_score,
+                "evidence_sentences": [chunk.get('sentence', '')],
+                "similar_patterns_count": 1,
+                "last_activity": chunk.get('created_at', ''),
+                "priority": priority,
+                "suggested_action": "관리자 검토 필요",
+                "chunk_id": chunk.get('chunk_id', ''),
+                "confirmed": chunk.get('confirmed', 0) == 1,
+                "post_id": chunk.get('post_id')
+            }
+            users.append(user_data)
+        
+        # 통계 정보 계산
+        total_users = len(users)
+        high_priority_count = len([u for u in users if u["priority"] == "HIGH"])
+        medium_priority_count = len([u for u in users if u["priority"] == "MEDIUM"])
+        low_priority_count = len([u for u in users if u["priority"] == "LOW"])
+        avg_risk_score = sum(u["risk_score"] for u in users) / total_users if total_users > 0 else 0.0
+        
+        return {
+            "summary": {
+                "total_users": total_users,
+                "high_priority_count": high_priority_count,
+                "medium_priority_count": medium_priority_count,
+                "low_priority_count": low_priority_count,
+                "avg_risk_score": round(avg_risk_score, 3),
+                "last_updated": datetime.now().isoformat()
+            },
+            "users": users,
+            "metadata": {
+                "limit": limit,
+                "source": "high_risk_store",
+                "note": "로컬 테스트용 더미 데이터"
+            }
+        }
+        
+    except Exception as e:
+        print(f"[ERROR] 고위험 사용자 조회 실패: {e}")
+        return {
+            "summary": {
+                "total_users": 0,
+                "high_priority_count": 0,
+                "medium_priority_count": 0,
+                "low_priority_count": 0,
+                "avg_risk_score": 0.0,
+                "last_updated": datetime.now().isoformat()
+            },
+            "users": [],
+            "metadata": {
+                "limit": limit,
+                "source": "error",
+                "error": str(e)
+            }
+        }
+
+# 임시 데모용 API - /risk/feedback POST 엔드포인트
+@router.post("/risk/feedback", tags=["risk-management"])
+async def submit_risk_feedback(request: RiskFeedbackRequest):
+    """
+    임시 데모용 API: 관리자 위험 판단 피드백 제출
+    
+    로컬 테스트 환경에서 관리자가 위험 문장에 대한 피드백을 제출할 수 있습니다.
+    
+    - **chunk_id**: 위험 문장 청크 ID
+    - **confirmed**: 관리자 확인 여부 (true: 맞다, false: 아니다)
+    
+    Returns:
+    - 피드백 업데이트 결과
+    """
+    
+    try:
+        # 로컬 테스트용 SQLite에서 피드백 업데이트
+        from chrun_backend.rag_pipeline.high_risk_store import update_feedback
+        
+        # 피드백 업데이트 실행
+        update_feedback(request.chunk_id, request.confirmed)
+        
+        # 성공 응답 반환
+        return {"status": "ok"}
+            
+    except Exception as e:
+        print(f"[ERROR] 피드백 처리 실패: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.post("/risk/report", tags=["risk-management"])
+async def generate_risk_report(request: RiskReportRequest):
+    """
+    새로운 게시글/댓글에 대한 위험 보고서 생성 (관리자 전용 테스트 API)
+    
+    **이 API는 관리자 전용 테스트용 API입니다**
+    
+    새로운 게시글/댓글 텍스트를 분석하여:
+    1. 문장별 이탈 위험도 점수 계산 (LLM 기반)
+    2. 과거 확인된 고위험 문장들과 유사도 비교
+    3. 증거 문장 및 제안 조치사항이 포함된 보고서 생성
+    
+    Args:
+        request (RiskReportRequest): 분석 요청 데이터
+            - text: 분석할 게시글/댓글 텍스트
+            - user_id: 작성자 사용자 ID  
+            - post_id: 게시글 ID
+            - created_at: 작성 시간 (선택사항)
+    
+    Returns:
+        Dict: 위험 보고서
+            - suspicious_user_id: 의심 사용자 ID
+            - evidence_sentences: 위험 문장들
+            - similar_patterns: 유사한 과거 패턴들
+            - why_flagged: 플래그된 이유
+            - suggested_action: 제안 조치사항
+            - priority: 우선순위 (HIGH/MEDIUM/LOW)
+            - risk_score: 전체 위험 점수
+    
+    **프론트엔드 사용법:**
+    ```javascript
+    // 새 게시글 위험도 분석
+    fetch('/api/risk/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: '이 서비스 정말 싫어요. 그만두고 싶어요.',
+        user_id: 'user_12345',
+        post_id: 'post_67890'
+      })
+    });
+    ```
+    """
+    
+    try:
+        # rag_reporter를 사용하여 위험 보고서 생성
+        from chrun_backend.rag_pipeline.rag_reporter import generate_risk_report
+        from datetime import datetime
+        
+        # created_at 파싱
+        created_at = None
+        if request.created_at:
+            try:
+                created_at = datetime.fromisoformat(request.created_at.replace('Z', '+00:00'))
+            except ValueError:
+                created_at = datetime.now()
+        else:
+            created_at = datetime.now()
+        
+        # 위험 보고서 생성
+        report = generate_risk_report(
+            new_post_text=request.text,
+            user_id=request.user_id,
+            post_id=request.post_id,
+            created_at=created_at
+        )
+        
+        print(f"[INFO] 위험 보고서 생성 완료: {request.user_id} / {request.post_id}")
+        
+        return {
+            "status": "success",
+            "report": report,
+            "metadata": {
+                "analysis_method": "rag_pipeline",
+                "llm_enabled": True,
+                "similarity_search": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+        
+    except Exception as e:
+        print(f"[ERROR] 위험 보고서 생성 실패: {e}")
+        
+        return {
+            "status": "error",
+            "message": f"보고서 생성 중 오류가 발생했습니다: {str(e)}",
+            "report": {
+                "suspicious_user_id": request.user_id,
+                "post_id": request.post_id,
+                "evidence_sentences": [],
+                "similar_patterns": [],
+                "why_flagged": f"분석 중 오류 발생: {str(e)}",
+                "suggested_action": "수동 검토 필요",
+                "priority": "MEDIUM",
+                "risk_score": 0.0,
+                "high_risk_count": 0,
+                "total_sentences": 0,
+                "analysis_timestamp": datetime.now().isoformat(),
+                "error": True
+            },
+            "metadata": {
+                "analysis_method": "rag_pipeline",
+                "llm_enabled": False,
+                "similarity_search": False,
+                "timestamp": datetime.now().isoformat()
+            }
+        }
+
