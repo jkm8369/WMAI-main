@@ -6,6 +6,7 @@ pydantic>=2.0.0
 pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 psutil>=5.9.0
+openai>=1.0.0
 httpx>=0.24.0
 
 # 딥러닝 및 NLP
@@ -14,8 +15,6 @@ transformers>=4.20.0
 numpy>=1.21.0
 scikit-learn>=1.0.0
 
-# OpenAI API
-openai>=1.0.0
 
 # 데이터베이스
 pymysql>=1.1.0
